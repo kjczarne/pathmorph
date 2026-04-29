@@ -131,7 +131,7 @@ _TEMPLATES: dict[str, str] = {
 }
 
 
-@app.command()
+@app.command("init")
 def init_cmd(
     output: Annotated[Path, typer.Argument(help="Path for the new schema file (.toml, .yaml, .yml, .json).")],
     name: Annotated[
@@ -172,17 +172,24 @@ def init_cmd(
 # pack                                                                  #
 # ------------------------------------------------------------------ #
 
-@app.command()
+@app.command("pack")
 def pack_cmd(
-    src: Annotated[Path, typer.Argument(help="Source directory to pack.")],
-    dst: Annotated[Path, typer.Argument(help="Destination directory for the packed layout.")],
+    srcs: Annotated[list[Path], typer.Argument(help="One or more source directories to pack.")],
+    dst: Annotated[
+        Path,
+        typer.Option("--dst", "-d", help="Destination directory for the packed layout.", show_default=False),
+    ],
     schema: SchemaOpt = ...,  # required
     move: MoveFlag = False,
     handle_existing: HandleExistingOpt = None,
     hash_algo: HashAlgoOpt = "sha256",
 ) -> None:
     """
-    Apply a schema's forward mapping from SRC to DST.
+    Apply a schema's forward mapping from one or more SRCS to DST.
+
+    Multiple source directories are supported.  Each file's schema-visible
+    path is prefixed with the source label (the path as given) so that rules
+    can distinguish between sources.  Single-source behaviour is unchanged.
 
     Writes a manifest to DST/.pathmorph_manifest.json that enables
     lossless inversion via the `unpack` command.
@@ -191,7 +198,7 @@ def pack_cmd(
 
     try:
         result = pack(
-            src, dst,
+            srcs, dst,
             schema=loaded_schema,
             move=move,
             collision=handle_existing,
@@ -203,14 +210,17 @@ def pack_cmd(
 
     action = "moved" if move else "copied"
     non_omitted = [r for r in result.records if not r.omitted]
-    passthrough = sum(1 for r in non_omitted if not r.matched)
+    passthrough = sum(1 for r in non_omitted if not r.matched and not r.crammed)
     remapped = sum(1 for r in non_omitted if r.matched)
+    crammed = sum(1 for r in non_omitted if r.crammed)
 
     console.print(f"\n[bold green]✓ Pack complete[/bold green]")
     console.print(f"  Schema    : [cyan]{loaded_schema.name}[/cyan]")
     console.print(f"  Files {action}: [white]{len(non_omitted)}[/white]")
     console.print(f"    remapped  : {remapped}")
     console.print(f"    passthrough: {passthrough}")
+    if crammed:
+        console.print(f"    crammed   : [magenta]{crammed}[/magenta]")
     if result.omitted_count:
         console.print(f"    omitted   : [yellow]{result.omitted_count}[/yellow]")
     console.print(f"  Manifest  : [dim]{result.manifest_path}[/dim]\n")
@@ -220,7 +230,7 @@ def pack_cmd(
 # unpack                                                               #
 # ------------------------------------------------------------------ #
 
-@app.command()
+@app.command("unpack")
 def unpack_cmd(
     packed_dir: Annotated[Path, typer.Argument(help="Directory produced by `pack`.")],
     dst: Annotated[Path, typer.Argument(help="Destination for restored files.")],
@@ -255,9 +265,9 @@ def unpack_cmd(
 # diff                                                                  #
 # ------------------------------------------------------------------ #
 
-@app.command()
+@app.command("diff")
 def diff_cmd(
-    src: Annotated[Path, typer.Argument(help="Source directory to inspect.")],
+    srcs: Annotated[list[Path], typer.Argument(help="One or more source directories to inspect.")],
     schema: SchemaOpt = ...,
     show_passthrough: Annotated[
         bool,
@@ -269,7 +279,7 @@ def diff_cmd(
     Show what the forward mapping would produce — without touching the filesystem.
     """
     loaded_schema = _load_schema(schema)
-    records = diff(src, loaded_schema)
+    records = diff(srcs, loaded_schema)
 
     table = Table(
         "Original path", "→  Packed path", "Status",
@@ -278,11 +288,14 @@ def diff_cmd(
         header_style="bold cyan",
     )
 
-    remapped = omitted = passthrough = 0
+    remapped = omitted = passthrough = crammed = 0
     for r in records:
         if r.omitted:
             table.add_row(str(r.original), "[dim]—[/dim]", "[yellow]omit[/yellow]")
             omitted += 1
+        elif r.crammed:
+            table.add_row(str(r.original), str(r.packed), "[magenta]cram[/magenta]")
+            crammed += 1
         elif not r.matched:
             if show_passthrough:
                 table.add_row(str(r.original), str(r.original), "[dim]pass[/dim]")
@@ -296,18 +309,21 @@ def diff_cmd(
         console.print(f"[dim]{loaded_schema.description}[/dim]")
     console.print()
     console.print(table)
-    console.print(
+    summary = (
         f"  [green]{remapped}[/green] remapped  "
         f"[dim]{passthrough}[/dim] passthrough  "
-        f"[yellow]{omitted}[/yellow] omitted\n"
+        f"[yellow]{omitted}[/yellow] omitted"
     )
+    if crammed:
+        summary += f"  [magenta]{crammed}[/magenta] crammed"
+    console.print(summary + "\n")
 
 
 # ------------------------------------------------------------------ #
 # verify                                                               #
 # ------------------------------------------------------------------ #
 
-@app.command()
+@app.command("verify")
 def verify_cmd(
     packed_dir: Annotated[Path, typer.Argument(help="Directory produced by `pack`.")],
 ) -> None:

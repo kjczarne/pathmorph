@@ -68,10 +68,11 @@ def hash_file(path: Path, algorithm: str = "sha256", chunk_size: int = 1 << 20) 
 
 @dataclass
 class ManifestEntry:
-    original: str   # relative to the source root at pack time
-    packed: str     # relative to the packed root
-    hash: str       # hex digest
-    algorithm: str  # algorithm used to compute hash
+    original: str          # relative to the source root at pack time
+    packed: str            # relative to the packed root
+    hash: str              # hex digest
+    algorithm: str         # algorithm used to compute hash
+    source_root: str = ""  # label of the source directory; "" for single-source packs
 
 
 @dataclass
@@ -126,7 +127,14 @@ class Manifest:
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
 
-    def add_entry(self, original: Path, packed: Path, file_path: Path) -> None:
+    def add_entry(
+        self,
+        original: Path,
+        packed: Path,
+        file_path: Path,
+        *,
+        source_root: str = "",
+    ) -> None:
         digest = hash_file(file_path, self.algorithm)
         self.entries.append(
             ManifestEntry(
@@ -134,6 +142,7 @@ class Manifest:
                 packed=str(packed),
                 hash=digest,
                 algorithm=self.algorithm,
+                source_root=source_root,
             )
         )
 

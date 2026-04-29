@@ -65,7 +65,7 @@ class Rule:
             ) from exc
 
 
-FallbackMode = Literal["passthrough", "omit"]
+FallbackMode = Literal["passthrough", "omit", "cram"]
 
 
 @dataclass
@@ -76,6 +76,7 @@ class Schema:
     description: str
     rules: list[Rule]
     fallback: FallbackMode = "passthrough"
+    crampath: str = ""  # destination bucket for unmatched files when fallback="cram"
 
     # ------------------------------------------------------------------ #
     # Factory                                                              #
@@ -98,9 +99,15 @@ class Schema:
         rules_raw = OmegaConf.to_container(s.rules, resolve=True)
 
         fallback: FallbackMode = s.get("fallback", "passthrough")
-        if fallback not in ("passthrough", "omit"):
+        if fallback not in ("passthrough", "omit", "cram"):
             raise ValueError(
-                f"'fallback' must be 'passthrough' or 'omit', got '{fallback}'."
+                f"'fallback' must be 'passthrough', 'omit', or 'cram', got '{fallback}'."
+            )
+
+        crampath = str(s.get("crampath", ""))
+        if fallback == "cram" and not crampath:
+            raise ValueError(
+                "'crampath' must be set when fallback='cram'."
             )
 
         return cls(
@@ -108,6 +115,7 @@ class Schema:
             description=str(s.get("description", "")),
             rules=[Rule.from_dict(r) for r in rules_raw],
             fallback=fallback,
+            crampath=crampath,
         )
 
     # ------------------------------------------------------------------ #
@@ -127,7 +135,9 @@ class Schema:
             if result is not None:
                 return result
 
-        # No rule matched
+        # No rule matched — apply fallback
         if self.fallback == "passthrough":
             return rel_path
+        if self.fallback == "cram":
+            return Path(self.crampath) / rel_path
         return None  # omit

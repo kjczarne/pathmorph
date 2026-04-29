@@ -73,7 +73,7 @@ pathmorph diff ./pipeline_output -s my_schema.yaml
 **3. Pack into the human layout**:
 
 ```bash
-pathmorph pack ./pipeline_output ./for_collaborators -s my_schema.yaml
+pathmorph pack ./pipeline_output -d ./for_collaborators -s my_schema.yaml
 ```
 
 This copies files (non-destructive by default) and writes
@@ -98,7 +98,7 @@ pathmorph verify ./for_collaborators
 ### `pack`
 
 ```
-pathmorph pack SRC DST -s/--schema SCHEMA [OPTIONS]
+pathmorph pack SRCS -d/--dst DST -s/--schema SCHEMA [OPTIONS]
 
 Options:
   --move                   Move files instead of copying
@@ -121,7 +121,7 @@ Options:
 ### `diff`
 
 ```
-pathmorph diff SRC -s/--schema SCHEMA [OPTIONS]
+pathmorph diff SRCS -s/--schema SCHEMA [OPTIONS]
 
 Options:
   --show-passthrough / --hide-passthrough   (default: show)

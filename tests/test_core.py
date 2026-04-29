@@ -43,6 +43,17 @@ schema:
       target: experiments/{exp}/scores.tsv
 """
 
+SCHEMA_YAML_CRAM = """\
+schema:
+  name: cram_schema
+  description: Schema that cramsunmatched files into a bucket
+  fallback: cram
+  crampath: _uncategorized
+  rules:
+    - pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
+      target: experiments/{exp}/candidates/{variant}/developability_scores.tsv
+"""
+
 
 @pytest.fixture()
 def schema_file(tmp_path: Path) -> Path:
@@ -55,6 +66,13 @@ def schema_file(tmp_path: Path) -> Path:
 def omit_schema_file(tmp_path: Path) -> Path:
     p = tmp_path / "omit_schema.yaml"
     p.write_text(SCHEMA_YAML_OMIT)
+    return p
+
+
+@pytest.fixture()
+def cram_schema_file(tmp_path: Path) -> Path:
+    p = tmp_path / "cram_schema.yaml"
+    p.write_text(SCHEMA_YAML_CRAM)
     return p
 
 
@@ -126,14 +144,14 @@ class TestRuleApply:
 class TestDiff:
     def test_diff_no_filesystem_change(self, src_dir: Path, schema_file: Path) -> None:
         schema = Schema.from_file(schema_file)
-        records = diff(src_dir, schema)
+        records = diff([src_dir], schema)
         # filesystem untouched
         assert (src_dir / "runs" / "exp_001" / "A" / "scores.tsv").exists()
         assert len(records) == 4  # all 4 source files
 
     def test_diff_identifies_remapped(self, src_dir: Path, schema_file: Path) -> None:
         schema = Schema.from_file(schema_file)
-        records = diff(src_dir, schema)
+        records = diff([src_dir], schema)
         remapped = [r for r in records if r.matched]
         assert len(remapped) == 3  # 2 scores.tsv + 1 report.txt
 
@@ -146,7 +164,7 @@ class TestPack:
     def test_basic_pack(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        result = pack(src_dir, dst, schema=schema)
+        result = pack([src_dir], dst, schema=schema)
 
         assert (dst / MANIFEST_FILENAME).exists()
         assert (
@@ -156,7 +174,7 @@ class TestPack:
     def test_manifest_is_valid_json(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         data = json.loads((dst / MANIFEST_FILENAME).read_text())
         assert data["version"] == 1
         assert isinstance(data["entries"], list)
@@ -164,39 +182,39 @@ class TestPack:
     def test_source_unchanged_after_copy(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         assert (src_dir / "runs" / "exp_001" / "A" / "scores.tsv").exists()
 
     def test_collision_abort(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         with pytest.raises(CollisionAbort):
-            pack(src_dir, dst, schema=schema, collision=CollisionStrategy.ABORT)
+            pack([src_dir], dst, schema=schema, collision=CollisionStrategy.ABORT)
 
     def test_collision_skip(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         # Modify a file to confirm skip doesn't overwrite
         target = dst / "experiments/exp_001/candidates/A/developability_scores.tsv"
         target.write_text("modified\n")
-        pack(src_dir, dst, schema=schema, collision=CollisionStrategy.SKIP)
+        pack([src_dir], dst, schema=schema, collision=CollisionStrategy.SKIP)
         assert target.read_text() == "modified\n"
 
     def test_collision_overwrite(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         target = dst / "experiments/exp_001/candidates/A/developability_scores.tsv"
         target.write_text("modified\n")
-        pack(src_dir, dst, schema=schema, collision=CollisionStrategy.OVERWRITE)
+        pack([src_dir], dst, schema=schema, collision=CollisionStrategy.OVERWRITE)
         assert target.read_text() == "score_data\n"
 
     def test_omit_fallback(self, src_dir: Path, omit_schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(omit_schema_file)
-        result = pack(src_dir, dst, schema=schema)
+        result = pack([src_dir], dst, schema=schema)
         assert result.omitted_count > 0
         assert not (dst / "unrelated" / "config.yaml").exists()
 
@@ -210,7 +228,7 @@ class TestUnpack:
         dst = tmp_path / "packed"
         restored = tmp_path / "restored"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         unpack(dst, restored)
         return restored
 
@@ -233,6 +251,150 @@ class TestUnpack:
 
 
 # ------------------------------------------------------------------ #
+# multi-source pack / unpack                                           #
+# ------------------------------------------------------------------ #
+
+SCHEMA_YAML_MULTI = """\
+schema:
+  name: multi_schema
+  description: Schema for multi-source tests
+  fallback: passthrough
+  rules:
+    - pattern: 'data/(?P<file>.+)'
+      target: 'inputs/{file}'
+    - pattern: 'outputs/(?P<file>.+)'
+      target: 'results/{file}'
+"""
+
+
+class TestMultiSource:
+    @pytest.fixture()
+    def multi_schema_file(self, tmp_path: Path) -> Path:
+        p = tmp_path / "multi_schema.yaml"
+        p.write_text(SCHEMA_YAML_MULTI)
+        return p
+
+    @pytest.fixture()
+    def data_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "data"
+        (d / "scores.tsv").parent.mkdir(parents=True, exist_ok=True)
+        (d / "scores.tsv").write_text("s1\n")
+        (d / "config.yaml").write_text("k: v\n")
+        return d
+
+    @pytest.fixture()
+    def outputs_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "outputs"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "result.json").write_text("{}\n")
+        return d
+
+    def test_multi_source_pack(
+        self, data_dir: Path, outputs_dir: Path, multi_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(multi_schema_file)
+        result = pack([data_dir, outputs_dir], dst, schema=schema)
+
+        assert (dst / "inputs/scores.tsv").exists()
+        assert (dst / "inputs/config.yaml").exists()
+        assert (dst / "results/result.json").exists()
+        assert result.omitted_count == 0
+
+    def test_multi_source_roundtrip(
+        self, data_dir: Path, outputs_dir: Path, multi_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        restored = tmp_path / "restored"
+        schema = Schema.from_file(multi_schema_file)
+        pack([data_dir, outputs_dir], dst, schema=schema)
+        unpack(dst, restored)
+
+        # source labels are relative paths (e.g. "tmp/.../data"), so we
+        # check that each original file lands under its source subdirectory
+        assert any((restored / data_dir.name).rglob("scores.tsv"))
+        assert any((restored / outputs_dir.name).rglob("result.json"))
+
+    def test_multi_source_manifest_has_source_root(
+        self, data_dir: Path, outputs_dir: Path, multi_schema_file: Path, tmp_path: Path
+    ) -> None:
+        import json as _json
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(multi_schema_file)
+        pack([data_dir, outputs_dir], dst, schema=schema)
+        data = _json.loads((dst / MANIFEST_FILENAME).read_text())
+        roots = {e["source_root"] for e in data["entries"]}
+        assert len(roots) == 2  # one label per source
+
+    def test_single_source_source_root_empty(
+        self, data_dir: Path, multi_schema_file: Path, tmp_path: Path
+    ) -> None:
+        import json as _json
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(multi_schema_file)
+        pack([data_dir], dst, schema=schema)
+        data = _json.loads((dst / MANIFEST_FILENAME).read_text())
+        assert all(e["source_root"] == "" for e in data["entries"])
+
+
+# ------------------------------------------------------------------ #
+# cram fallback                                                         #
+# ------------------------------------------------------------------ #
+
+class TestCramFallback:
+    def test_unmatched_files_land_in_crampath(
+        self, src_dir: Path, cram_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(cram_schema_file)
+        pack([src_dir], dst, schema=schema)
+
+        # scores.tsv files are remapped by the rule
+        assert (dst / "experiments/exp_001/candidates/A/developability_scores.tsv").exists()
+        # report.txt and config.yaml have no matching rule → crammed
+        assert (dst / "_uncategorized/runs/exp_001/A/report.txt").exists()
+        assert (dst / "_uncategorized/unrelated/config.yaml").exists()
+
+    def test_cram_records_marked(
+        self, src_dir: Path, cram_schema_file: Path, tmp_path: Path
+    ) -> None:
+        schema = Schema.from_file(cram_schema_file)
+        records = diff([src_dir], schema)
+        crammed = [r for r in records if r.crammed]
+        remapped = [r for r in records if r.matched]
+        # both scores.tsv match the rule; report.txt and config.yaml are crammed
+        assert len(crammed) == 2
+        assert len(remapped) == 2
+        assert all(not r.omitted for r in crammed)
+        assert all(not r.matched for r in crammed)
+
+    def test_cram_roundtrip(
+        self, src_dir: Path, cram_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        restored = tmp_path / "restored"
+        schema = Schema.from_file(cram_schema_file)
+        pack([src_dir], dst, schema=schema)
+        unpack(dst, restored)
+        assert (restored / "runs/exp_001/A/scores.tsv").exists()
+        assert (restored / "unrelated/config.yaml").exists()
+
+    def test_cram_missing_crampath_raises(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(
+            "schema:\n  name: x\n  fallback: cram\n  rules: []\n"
+        )
+        with pytest.raises(ValueError, match="crampath"):
+            Schema.from_file(bad)
+
+    def test_bad_fallback_includes_cram_in_message(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("schema:\n  name: x\n  fallback: delete\n  rules: []\n")
+        with pytest.raises(ValueError, match="fallback"):
+            Schema.from_file(bad)
+
+
+# ------------------------------------------------------------------ #
 # verify                                                               #
 # ------------------------------------------------------------------ #
 
@@ -240,14 +402,14 @@ class TestVerify:
     def test_verify_clean_pack(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         result = verify(dst)
         assert result.passed
 
     def test_verify_detects_tamper(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
-        pack(src_dir, dst, schema=schema)
+        pack([src_dir], dst, schema=schema)
         # Tamper with a file
         target = dst / "experiments/exp_001/candidates/A/developability_scores.tsv"
         target.write_text("tampered!\n")

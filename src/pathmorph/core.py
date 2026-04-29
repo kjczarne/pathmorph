@@ -13,7 +13,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Iterator
 
 from pathmorph.collision import CollisionAbort, CollisionResolver, CollisionStrategy
 from pathmorph.manifest import MANIFEST_FILENAME, Manifest
@@ -33,6 +33,7 @@ class MappingRecord:
     packed: Path     # relative to dst root
     matched: bool    # False when file was passed through unchanged
     omitted: bool    # True when schema fallback=omit and no rule matched
+    crammed: bool = False  # True when schema fallback=cram and no rule matched
 
 
 @dataclass
@@ -72,6 +73,39 @@ def _iter_files(root: Path) -> Iterator[Path]:
             yield p
 
 
+def _source_label(multi: bool, src: Path) -> str:
+    """Return the virtual prefix for *src* in a multi-source pack.
+
+    Empty string for single-source packs preserves backward compatibility.
+    """
+    if not multi:
+        return ""
+    if not src.is_absolute():
+        return str(src)
+    try:
+        return str(src.relative_to(Path.cwd()))
+    except ValueError:
+        return src.name
+
+
+def _is_crammed(schema: Schema, original: Path, mapped: Path) -> bool:
+    """True when *mapped* is the cram-fallback destination for *original*."""
+    return (
+        schema.fallback == "cram"
+        and schema.crampath != ""
+        and mapped == Path(schema.crampath) / original
+    )
+
+
+def _iter_sources(srcs: list[Path]) -> Iterator[tuple[Path, Path, str]]:
+    """Yield (abs_path, rel_within_source, label) across all sources."""
+    multi = len(srcs) > 1
+    for src in srcs:
+        label = _source_label(multi, src)
+        for abs_path in _iter_files(src):
+            yield abs_path, abs_path.relative_to(src), label
+
+
 def _transfer(src: Path, dst: Path, move: bool) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if move:
@@ -85,20 +119,21 @@ def _transfer(src: Path, dst: Path, move: bool) -> None:
 # ------------------------------------------------------------------ #
 
 
-def diff(src: Path, schema: Schema) -> list[MappingRecord]:
+def diff(srcs: list[Path], schema: Schema) -> list[MappingRecord]:
     """
-    Compute the forward mapping for all files in *src* without
+    Compute the forward mapping for all files in *srcs* without
     touching the filesystem.
     """
     records: list[MappingRecord] = []
-    for abs_path in _iter_files(src):
-        rel = abs_path.relative_to(src)
-        mapped = schema.forward(rel)
+    for _abs, rel, label in _iter_sources(srcs):
+        virtual_rel = Path(label) / rel if label else rel
+        mapped = schema.forward(virtual_rel)
         if mapped is None:
-            records.append(MappingRecord(rel, Path(), matched=False, omitted=True))
+            records.append(MappingRecord(virtual_rel, Path(), matched=False, omitted=True))
         else:
-            matched = mapped != rel
-            records.append(MappingRecord(rel, mapped, matched=matched, omitted=False))
+            crammed = _is_crammed(schema, virtual_rel, mapped)
+            matched = not crammed and mapped != virtual_rel
+            records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
     return records
 
 
@@ -108,7 +143,7 @@ def diff(src: Path, schema: Schema) -> list[MappingRecord]:
 
 
 def pack(
-    src: Path,
+    srcs: list[Path],
     dst: Path,
     schema: Schema,
     *,
@@ -117,12 +152,19 @@ def pack(
     hash_algorithm: str = "sha256",
 ) -> PackResult:
     """
-    Apply *schema*'s forward mapping from *src* to *dst*.
+    Apply *schema*'s forward mapping from one or more *srcs* to *dst*.
+
+    When multiple sources are supplied each file's schema-visible path is
+    prefixed with the source's label (the path as given on the CLI, or its
+    name when an absolute path cannot be made relative to cwd).  The label
+    is stored in the manifest so ``unpack`` can restore files to the correct
+    source root.
 
     Writes a manifest to ``dst/.pathmorph_manifest.json``.
     """
-    if not src.is_dir():
-        raise NotADirectoryError(f"Source '{src}' is not a directory.")
+    for src in srcs:
+        if not src.is_dir():
+            raise NotADirectoryError(f"Source '{src}' is not a directory.")
     dst.mkdir(parents=True, exist_ok=True)
 
     resolver = CollisionResolver(collision)
@@ -130,27 +172,30 @@ def pack(
     records: list[MappingRecord] = []
     omitted = 0
 
-    for abs_src in _iter_files(src):
-        rel = abs_src.relative_to(src)
-        mapped = schema.forward(rel)
+    for abs_src, rel, label in _iter_sources(srcs):
+        virtual_rel = Path(label) / rel if label else rel
+        mapped = schema.forward(virtual_rel)
 
         if mapped is None:
-            records.append(MappingRecord(rel, Path(), matched=False, omitted=True))
+            records.append(MappingRecord(virtual_rel, Path(), matched=False, omitted=True))
             omitted += 1
             continue
 
         abs_dst = dst / mapped
 
+        crammed = _is_crammed(schema, virtual_rel, mapped)
+        matched = not crammed and mapped != virtual_rel
+
         if abs_dst.exists():
             action = resolver.resolve(abs_dst)   # may raise CollisionAbort
             if action == "skip":
-                records.append(MappingRecord(rel, mapped, matched=mapped != rel, omitted=False))
+                records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
                 continue
             # overwrite — fall through to transfer
 
         _transfer(abs_src, abs_dst, move=move)
-        manifest.add_entry(rel, mapped, abs_dst)
-        records.append(MappingRecord(rel, mapped, matched=mapped != rel, omitted=False))
+        manifest.add_entry(rel, mapped, abs_dst, source_root=label)
+        records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
 
     manifest_path = manifest.write(dst)
     return PackResult(
@@ -187,7 +232,9 @@ def unpack(
 
     for entry in manifest.iter_entries():
         abs_packed = packed_root / entry.packed
-        abs_dst = dst / entry.original
+        # source_root="" → single-source; collapses to dst/original (backward-compat)
+        # source_root="data/run1" → multi-source; restore under dst/data/run1/
+        abs_dst = dst / entry.source_root / entry.original if entry.source_root else dst / entry.original
 
         if not abs_packed.exists():
             # File disappeared from packed dir — warn, don't abort
