@@ -45,7 +45,7 @@ pip install pathmorph[xxhash]
 schema:
   name: human_v1
   description: "Friendly layout for collaborators"
-  fallback: passthrough   # or: omit
+  fallback: passthrough   # or: omit/cram
 
   rules:
     - pattern: "runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv"
@@ -63,6 +63,7 @@ Rules are evaluated in order — the **first match wins**.
 `fallback` controls what happens when no rule matches:
 - `passthrough` — file is copied as-is (default)
 - `omit` — file is skipped entirely
+- `cram` – file is crammed into the subdirectory path specified in the `crampath` variable in the schema
 
 **2. Preview the mapping** (dry-run, no filesystem changes):
 
