@@ -223,6 +223,8 @@ def pack_cmd(
         console.print(f"    crammed   : [magenta]{crammed}[/magenta]")
     if result.omitted_count:
         console.print(f"    omitted   : [yellow]{result.omitted_count}[/yellow]")
+    if result.symlink_count:
+        console.print(f"  Symlinks  : [blue]{result.symlink_count}[/blue]")
     console.print(f"  Manifest  : [dim]{result.manifest_path}[/dim]\n")
 
 
@@ -288,7 +290,7 @@ def diff_cmd(
         header_style="bold cyan",
     )
 
-    remapped = omitted = passthrough = crammed = 0
+    remapped = omitted = passthrough = crammed = symlinked = 0
     for r in records:
         if r.omitted:
             table.add_row(str(r.original), "[dim]—[/dim]", "[yellow]omit[/yellow]")
@@ -303,6 +305,9 @@ def diff_cmd(
         else:
             table.add_row(str(r.original), str(r.packed), "[green]remap[/green]")
             remapped += 1
+        for sym in r.symlink_targets:
+            table.add_row("", str(sym), "[blue]symlink →[/blue]")
+            symlinked += 1
 
     console.print(f"\n[bold]Schema:[/bold] [cyan]{loaded_schema.name}[/cyan]")
     if loaded_schema.description:
@@ -316,6 +321,8 @@ def diff_cmd(
     )
     if crammed:
         summary += f"  [magenta]{crammed}[/magenta] crammed"
+    if symlinked:
+        summary += f"  [blue]{symlinked}[/blue] symlinked"
     console.print(summary + "\n")
 
 

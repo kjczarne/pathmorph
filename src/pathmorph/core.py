@@ -10,8 +10,9 @@ All four public functions follow the same signature philosophy:
 
 from __future__ import annotations
 
+import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
@@ -33,7 +34,8 @@ class MappingRecord:
     packed: Path     # relative to dst root
     matched: bool    # False when file was passed through unchanged
     omitted: bool    # True when schema fallback=omit and no rule matched
-    crammed: bool = False  # True when schema fallback=cram and no rule matched
+    crammed: bool = False                          # True when schema fallback=cram and no rule matched
+    symlink_targets: list[Path] = field(default_factory=list)  # additional symlink paths created
 
 
 @dataclass
@@ -41,6 +43,7 @@ class PackResult:
     records: list[MappingRecord]
     manifest_path: Path
     omitted_count: int
+    symlink_count: int
     moved: bool  # True if --move was used
 
 
@@ -88,15 +91,6 @@ def _source_label(multi: bool, src: Path) -> str:
         return src.name
 
 
-def _is_crammed(schema: Schema, original: Path, mapped: Path) -> bool:
-    """True when *mapped* is the cram-fallback destination for *original*."""
-    return (
-        schema.fallback == "cram"
-        and schema.crampath != ""
-        and mapped == Path(schema.crampath) / original
-    )
-
-
 def _iter_sources(srcs: list[Path]) -> Iterator[tuple[Path, Path, str]]:
     """Yield (abs_path, rel_within_source, label) across all sources."""
     multi = len(srcs) > 1
@@ -127,13 +121,16 @@ def diff(srcs: list[Path], schema: Schema) -> list[MappingRecord]:
     records: list[MappingRecord] = []
     for _abs, rel, label in _iter_sources(srcs):
         virtual_rel = Path(label) / rel if label else rel
-        mapped = schema.forward(virtual_rel)
-        if mapped is None:
+        res = schema.resolve(virtual_rel)
+        if res.mapped is None:
             records.append(MappingRecord(virtual_rel, Path(), matched=False, omitted=True))
         else:
-            crammed = _is_crammed(schema, virtual_rel, mapped)
-            matched = not crammed and mapped != virtual_rel
-            records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
+            records.append(MappingRecord(
+                virtual_rel, res.mapped,
+                matched=res.matched, omitted=False,
+                crammed=res.crammed,
+                symlink_targets=res.symlink_targets,
+            ))
     return records
 
 
@@ -171,37 +168,58 @@ def pack(
     manifest = Manifest.new(schema.name, schema.description, hash_algorithm)
     records: list[MappingRecord] = []
     omitted = 0
+    symlinks_created = 0
 
     for abs_src, rel, label in _iter_sources(srcs):
         virtual_rel = Path(label) / rel if label else rel
-        mapped = schema.forward(virtual_rel)
+        res = schema.resolve(virtual_rel)
 
-        if mapped is None:
+        if res.mapped is None:
             records.append(MappingRecord(virtual_rel, Path(), matched=False, omitted=True))
             omitted += 1
             continue
 
-        abs_dst = dst / mapped
-
-        crammed = _is_crammed(schema, virtual_rel, mapped)
-        matched = not crammed and mapped != virtual_rel
+        abs_dst = dst / res.mapped
 
         if abs_dst.exists():
             action = resolver.resolve(abs_dst)   # may raise CollisionAbort
             if action == "skip":
-                records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
+                records.append(MappingRecord(
+                    virtual_rel, res.mapped,
+                    matched=res.matched, omitted=False,
+                    crammed=res.crammed,
+                ))
                 continue
             # overwrite — fall through to transfer
 
         _transfer(abs_src, abs_dst, move=move)
-        manifest.add_entry(rel, mapped, abs_dst, source_root=label)
-        records.append(MappingRecord(virtual_rel, mapped, matched=matched, omitted=False, crammed=crammed))
+        manifest.add_entry(rel, res.mapped, abs_dst, source_root=label)
+
+        # Create relative symlinks for any SymlinkRules that fired.
+        created_sym: list[Path] = []
+        for sym_rel in res.symlink_targets:
+            abs_sym = dst / sym_rel
+            abs_sym.parent.mkdir(parents=True, exist_ok=True)
+            rel_target = os.path.relpath(abs_dst, abs_sym.parent)
+            if abs_sym.exists() or abs_sym.is_symlink():
+                abs_sym.unlink()
+            abs_sym.symlink_to(rel_target)
+            created_sym.append(sym_rel)
+            symlinks_created += 1
+
+        records.append(MappingRecord(
+            virtual_rel, res.mapped,
+            matched=res.matched, omitted=False,
+            crammed=res.crammed,
+            symlink_targets=created_sym,
+        ))
 
     manifest_path = manifest.write(dst)
     return PackResult(
         records=records,
         manifest_path=manifest_path,
         omitted_count=omitted,
+        symlink_count=symlinks_created,
         moved=move,
     )
 

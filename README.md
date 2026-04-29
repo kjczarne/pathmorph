@@ -65,6 +65,23 @@ Rules are evaluated in order — the **first match wins**.
 - `omit` — file is skipped entirely
 - `cram` – file is crammed into the subdirectory path specified in the `crampath` variable in the schema
 
+You can also use symlinks that match against a pre-existing rule via its `id`:
+
+```toml
+[[schema.rules]]
+id      = "scores"          # optional id — required if referenced by a symlink rule
+pattern = 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\.tsv'
+target  = "experiments/{exp}/candidates/{variant}/developability_scores.tsv"
+
+[[schema.rules]]
+symlink = "scores"          # references the rule above by id
+target  = "latest/{exp}/{variant}/scores.tsv"
+```
+
+> [!note]
+> TOML/YAML/JSON schema files are supported
+
+
 **2. Preview the mapping** (dry-run, no filesystem changes):
 
 ```bash

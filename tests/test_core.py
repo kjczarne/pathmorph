@@ -136,6 +136,40 @@ class TestRuleApply:
         result = schema.forward(Path("unrelated/config.yaml"))
         assert result is None
 
+    def test_directory_prefix_match_appends_suffix(self, tmp_path: Path) -> None:
+        """A pattern targeting a directory renames the tree and preserves subtree paths."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/fp'\n"
+            "      target: '04_Shortlist/outputs/FinalPicks'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        assert schema.forward(Path("outputs/o01/fp/a.txt")) == Path("04_Shortlist/outputs/FinalPicks/a.txt")
+        assert schema.forward(Path("outputs/o01/fp/sub/b.txt")) == Path("04_Shortlist/outputs/FinalPicks/sub/b.txt")
+
+    def test_directory_prefix_exact_match(self, tmp_path: Path) -> None:
+        """Pattern matches a path with no trailing components → target returned as-is."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'raw'\n      target: 'inputs'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        assert schema.forward(Path("raw")) == Path("inputs")
+
+    def test_partial_component_not_matched(self, tmp_path: Path) -> None:
+        """Pattern 'data' must not match 'database/file.txt'."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'data'\n      target: 'inputs'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        # 'database/...' shares a prefix with 'data' but is a different component
+        result = schema.forward(Path("database/file.txt"))
+        assert result == Path("database/file.txt")  # passthrough, not remapped
+
 
 # ------------------------------------------------------------------ #
 # diff                                                                  #
@@ -217,6 +251,26 @@ class TestPack:
         result = pack([src_dir], dst, schema=schema)
         assert result.omitted_count > 0
         assert not (dst / "unrelated" / "config.yaml").exists()
+
+    def test_directory_pattern_copies_subtree(self, tmp_path: Path) -> None:
+        """A rule matching a directory prefix recursively remaps all files beneath it."""
+        src = tmp_path / "src"
+        (src / "outputs/o01/fp/sub").mkdir(parents=True)
+        (src / "outputs/o01/fp/a.txt").write_text("a")
+        (src / "outputs/o01/fp/sub/b.txt").write_text("b")
+
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/fp'\n"
+            "      target: '04_Shortlist/outputs/FinalPicks'\n"
+        )
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(schema_file)
+        pack([src], dst, schema=schema)
+
+        assert (dst / "04_Shortlist/outputs/FinalPicks/a.txt").exists()
+        assert (dst / "04_Shortlist/outputs/FinalPicks/sub/b.txt").exists()
 
 
 # ------------------------------------------------------------------ #
@@ -391,6 +445,137 @@ class TestCramFallback:
         bad = tmp_path / "bad.yaml"
         bad.write_text("schema:\n  name: x\n  fallback: delete\n  rules: []\n")
         with pytest.raises(ValueError, match="fallback"):
+            Schema.from_file(bad)
+
+
+# ------------------------------------------------------------------ #
+# symlink rules                                                         #
+# ------------------------------------------------------------------ #
+
+SCHEMA_YAML_SYMLINK = """\
+schema:
+  name: symlink_schema
+  description: Schema with a symlink rule
+  fallback: passthrough
+  rules:
+    - id: scores
+      pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
+      target: experiments/{exp}/candidates/{variant}/developability_scores.tsv
+    - symlink: scores
+      target: latest/{exp}/{variant}/scores.tsv
+"""
+
+SCHEMA_YAML_SYMLINK_DIR = """\
+schema:
+  name: symlink_dir_schema
+  description: Symlink rule on a directory-prefix match
+  fallback: passthrough
+  rules:
+    - id: fp
+      pattern: 'outputs/(?P<order>o\\d+)/fp'
+      target: '04_Shortlist/{order}/FinalPicks'
+    - symlink: fp
+      target: 'links/{order}/fp'
+"""
+
+
+class TestSymlinkRules:
+    @pytest.fixture()
+    def symlink_schema_file(self, tmp_path: Path) -> Path:
+        p = tmp_path / "symlink_schema.yaml"
+        p.write_text(SCHEMA_YAML_SYMLINK)
+        return p
+
+    @pytest.fixture()
+    def symlink_dir_schema_file(self, tmp_path: Path) -> Path:
+        p = tmp_path / "symlink_dir_schema.yaml"
+        p.write_text(SCHEMA_YAML_SYMLINK_DIR)
+        return p
+
+    def test_symlink_created_in_packed_output(
+        self, src_dir: Path, symlink_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(symlink_schema_file)
+        result = pack([src_dir], dst, schema=schema)
+
+        # Real file exists
+        assert (dst / "experiments/exp_001/candidates/A/developability_scores.tsv").exists()
+        # Symlink exists and points to the real file
+        sym = dst / "latest/exp_001/A/scores.tsv"
+        assert sym.is_symlink()
+        assert sym.resolve() == (dst / "experiments/exp_001/candidates/A/developability_scores.tsv").resolve()
+
+    def test_symlink_count_in_result(
+        self, src_dir: Path, symlink_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(symlink_schema_file)
+        result = pack([src_dir], dst, schema=schema)
+        # Two scores.tsv files → two symlinks
+        assert result.symlink_count == 2
+
+    def test_symlink_not_in_manifest(
+        self, src_dir: Path, symlink_schema_file: Path, tmp_path: Path
+    ) -> None:
+        import json as _json
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(symlink_schema_file)
+        pack([src_dir], dst, schema=schema)
+        data = _json.loads((dst / MANIFEST_FILENAME).read_text())
+        packed_paths = {e["packed"] for e in data["entries"]}
+        assert not any("latest" in p for p in packed_paths)
+
+    def test_symlink_dropped_on_unpack(
+        self, src_dir: Path, symlink_schema_file: Path, tmp_path: Path
+    ) -> None:
+        dst = tmp_path / "packed"
+        restored = tmp_path / "restored"
+        schema = Schema.from_file(symlink_schema_file)
+        pack([src_dir], dst, schema=schema)
+        unpack(dst, restored)
+        # Original files restored, symlink paths not present
+        assert (restored / "runs/exp_001/A/scores.tsv").exists()
+        assert not (restored / "latest").exists()
+
+    def test_symlink_directory_prefix(
+        self, tmp_path: Path, symlink_dir_schema_file: Path
+    ) -> None:
+        src = tmp_path / "src"
+        (src / "outputs/o01/fp/sub").mkdir(parents=True)
+        (src / "outputs/o01/fp/a.txt").write_text("a")
+        (src / "outputs/o01/fp/sub/b.txt").write_text("b")
+
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(symlink_dir_schema_file)
+        pack([src], dst, schema=schema)
+
+        # Real files remapped
+        assert (dst / "04_Shortlist/o01/FinalPicks/a.txt").exists()
+        assert (dst / "04_Shortlist/o01/FinalPicks/sub/b.txt").exists()
+        # Symlinks mirror the subtree
+        sym_a = dst / "links/o01/fp/a.txt"
+        sym_b = dst / "links/o01/fp/sub/b.txt"
+        assert sym_a.is_symlink()
+        assert sym_b.is_symlink()
+        assert sym_a.resolve() == (dst / "04_Shortlist/o01/FinalPicks/a.txt").resolve()
+        assert sym_b.resolve() == (dst / "04_Shortlist/o01/FinalPicks/sub/b.txt").resolve()
+
+    def test_symlink_diff_records(
+        self, src_dir: Path, symlink_schema_file: Path
+    ) -> None:
+        schema = Schema.from_file(symlink_schema_file)
+        records = diff([src_dir], schema)
+        sym_records = [r for r in records if r.symlink_targets]
+        assert len(sym_records) == 2  # two scores.tsv files
+
+    def test_invalid_symlink_reference_raises(self, tmp_path: Path) -> None:
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(
+            "schema:\n  name: x\n  fallback: passthrough\n  rules:\n"
+            "    - symlink: nonexistent\n      target: foo/bar\n"
+        )
+        with pytest.raises(ValueError, match="nonexistent"):
             Schema.from_file(bad)
 
 

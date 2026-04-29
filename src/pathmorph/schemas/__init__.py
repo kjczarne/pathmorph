@@ -1,3 +1,3 @@
-from pathmorph.schemas.loader import Rule, Schema
+from pathmorph.schemas.loader import Resolution, Rule, Schema, SymlinkRule
 
-__all__ = ["Schema", "Rule"]
+__all__ = ["Resolution", "Schema", "Rule", "SymlinkRule"]
