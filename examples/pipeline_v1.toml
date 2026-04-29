@@ -1,0 +1,19 @@
+# Same schema as pipeline_v1.yaml but in TOML — both are valid.
+# pathmorph accepts .toml, .yaml, .yml, .json interchangeably.
+
+[schema]
+name        = "pipeline_v1_toml"
+description = "Same mapping as pipeline_v1.yaml, TOML edition"
+fallback    = "passthrough"
+
+[[schema.rules]]
+pattern = 'runs/(?P<run>[^/]+)/(?P<variant>[^/]+)/scores\.tsv'
+target  = "experiments/{run}/candidates/{variant}/developability_scores.tsv"
+
+[[schema.rules]]
+pattern = 'runs/(?P<run>[^/]+)/(?P<variant>[^/]+)/(?P<rest>.+)'
+target  = "experiments/{run}/candidates/{variant}/{rest}"
+
+[[schema.rules]]
+pattern = 'runs/(?P<run>[^/]+)/(?P<rest>[^/]+)'
+target  = "experiments/{run}/{rest}"

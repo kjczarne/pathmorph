@@ -1,0 +1,22 @@
+# Example pathmorph schema
+#
+# NOTE: use single-quoted strings for regex patterns in YAML so that
+# backslashes are passed through literally (no escape processing).
+
+schema:
+  name: pipeline_v1
+  description: Human-readable layout for pipeline outputs
+  fallback: passthrough
+
+  rules:
+    # Score TSVs get a more descriptive name
+    - pattern: 'runs/(?P<run>[^/]+)/(?P<variant>[^/]+)/scores\.tsv'
+      target: experiments/{run}/candidates/{variant}/developability_scores.tsv
+
+    # All other per-variant files keep their name, just move to candidates/
+    - pattern: 'runs/(?P<run>[^/]+)/(?P<variant>[^/]+)/(?P<rest>.+)'
+      target: experiments/{run}/candidates/{variant}/{rest}
+
+    # Top-level run files (config, summary) just move to experiments/<run>/
+    - pattern: 'runs/(?P<run>[^/]+)/(?P<rest>[^/]+)'
+      target: experiments/{run}/{rest}
