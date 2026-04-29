@@ -66,16 +66,39 @@ class Rule:
         entire directory trees:
 
         - File pattern  ``runs/(?P<exp>[^/]+)/scores\\.tsv`` matches only
-          that exact file.
+          that exact file and renames it to whatever ``target`` specifies.
         - Directory pattern  ``runs/(?P<exp>[^/]+)/raw`` matches every file
           inside ``raw/`` and appends the remaining path components to the
           target, reproducing the subtree under the new name.
+        - Glob pattern  ``outputs/(?P<order>o\\d+)/o\\d+_docked.*`` — the
+          ``.*`` crosses path separators so it fully consumes the path.
+          pathmorph automatically retries with the shortest prefix that also
+          matches, preserving everything after it as the suffix::
+
+              # outputs/o000/o000_docked/all_pdbs/file.pdb
+              # → shortest prefix match: outputs/o000/o000_docked
+              # → suffix: all_pdbs/file.pdb
+              # → result: 03_Modeler/outputs/all_pdbs/file.pdb
+
+          For genuinely flat files (no path separator after the matched
+          prefix), use ``{__name__}`` to avoid overwriting::
+
+              target = "03_Modeler/outputs/{__name__}"
+
+        Three implicit variables are always available in ``target`` without
+        needing to be declared as named groups:
+
+        - ``{__name__}``   — original filename including extension (``file.tsv``)
+        - ``{__stem__}``   — filename without extension             (``file``)
+        - ``{__suffix__}`` — extension including the dot            (``.tsv``)
+
+        A user-defined capture group with the same name takes priority.
 
         Returns ``(remapped_path, capture_groups, suffix)`` on success, or
         ``None`` if the pattern does not match at a valid boundary.
         ``suffix`` is the path tail beyond the match (empty string for exact
-        file matches); it is appended to symlink targets that reference this
-        rule.
+        file/glob matches); it is appended to symlink targets that reference
+        this rule.
         """
         s = str(rel_path)
         m = self.pattern.match(s)
@@ -85,15 +108,47 @@ class Rule:
         # Reject matches that stop in the middle of a path component.
         if end < len(s) and s[end] != "/":
             return None
-        groups = m.groupdict()
+
+        suffix = s[end + 1:] if end < len(s) else ""
+        effective_m = m
+
+        # When the pattern fully consumed the path (no suffix from the
+        # boundary check above), try to find the shortest prefix of the path
+        # that the pattern can also match at a '/' boundary.  This preserves
+        # subdirectory structure for directory-glob patterns that use '.*'
+        # across separators, e.g.
+        #
+        #   pattern = 'outputs/(?P<order>o\d+)/o\d+_docked.*'
+        #   target  = '03_Modeler/outputs'
+        #
+        # For outputs/o000/o000_docked/all_pdbs/file.pdb the effective prefix
+        # becomes 'outputs/o000/o000_docked' and the suffix 'all_pdbs/file.pdb',
+        # so the result is '03_Modeler/outputs/all_pdbs/file.pdb' rather than
+        # every file overwriting '03_Modeler/outputs'.
+        if not suffix:
+            parts = s.split("/")
+            for split_point in range(1, len(parts)):
+                prefix = "/".join(parts[:split_point])
+                m2 = self.pattern.match(prefix)
+                if m2 is not None and m2.end() == len(prefix):
+                    effective_m = m2
+                    suffix = "/".join(parts[split_point:])
+                    break
+
+        groups = effective_m.groupdict()
+        # Implicit path variables — available in every target without being
+        # declared as named groups. setdefault means user groups take priority.
+        groups.setdefault("__name__", rel_path.name)      # full filename:  "file.txt"
+        groups.setdefault("__stem__", rel_path.stem)      # name minus ext: "file"
+        groups.setdefault("__suffix__", rel_path.suffix)  # extension:      ".txt"
         try:
             base = Path(self.target.format(**groups))
         except KeyError as exc:
             raise ValueError(
-                f"Rule target '{self.target}' references capture group {exc} "
-                f"which is not present in pattern '{self.pattern.pattern}'."
+                f"Rule target '{self.target}' references unknown group {exc}. "
+                f"Named groups in pattern: {sorted(m.groupdict())}. "
+                f"Built-in variables: {{__name__}}, {{__stem__}}, {{__suffix__}}."
             ) from exc
-        suffix = s[end + 1:] if end < len(s) else ""
         path = base / suffix if suffix else base
         return path, groups, suffix
 

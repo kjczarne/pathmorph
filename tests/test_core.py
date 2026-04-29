@@ -158,6 +158,114 @@ class TestRuleApply:
         schema = Schema.from_file(schema_file)
         assert schema.forward(Path("raw")) == Path("inputs")
 
+    def test_implicit_name_variable(self, tmp_path: Path) -> None:
+        """Glob pattern + {__name__} sends matched files into a directory bucket."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/o\\d+_docked.*'\n"
+            "      target: '03_Modeler/outputs/{__name__}'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        assert schema.forward(Path("outputs/o01/o01_docked_result.txt")) == Path(
+            "03_Modeler/outputs/o01_docked_result.txt"
+        )
+        assert schema.forward(Path("outputs/o02/o02_docked_other.csv")) == Path(
+            "03_Modeler/outputs/o02_docked_other.csv"
+        )
+
+    def test_implicit_stem_and_suffix_variables(self, tmp_path: Path) -> None:
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'raw/(?P<run>[^/]+)/.*'\n"
+            "      target: 'processed/{run}/{__stem__}.parquet'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        assert schema.forward(Path("raw/r01/data.csv")) == Path(
+            "processed/r01/data.parquet"
+        )
+
+    def test_glob_preserves_subdirectory_structure(self, tmp_path: Path) -> None:
+        """'.*' pattern auto-finds shortest prefix, preserving subdirectory structure."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: omit\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/o\\d+_docked.*'\n"
+            "      target: '03_Modeler/outputs'\n"
+        )
+        src = tmp_path / "src"
+        (src / "outputs/o000/o000_docked/all_pdbs").mkdir(parents=True)
+        (src / "outputs/o000/o000_docked/other").mkdir(parents=True)
+        (src / "outputs/o000/o000_docked/all_pdbs/a.pdb").write_text("a")
+        (src / "outputs/o000/o000_docked/all_pdbs/b.pdb").write_text("b")
+        (src / "outputs/o000/o000_docked/other/c.txt").write_text("c")
+
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(schema_file)
+        pack([src], dst, schema=schema)
+
+        # Subdirectory structure is preserved beneath the target
+        assert (dst / "03_Modeler/outputs/all_pdbs/a.pdb").read_text() == "a"
+        assert (dst / "03_Modeler/outputs/all_pdbs/b.pdb").read_text() == "b"
+        assert (dst / "03_Modeler/outputs/other/c.txt").read_text() == "c"
+
+    def test_glob_different_docked_dirs_dont_mix(self, tmp_path: Path) -> None:
+        """Two o*_docked directories land in separate subtrees, not merged."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: omit\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/(?P<docked>o\\d+_docked[^/]*)'\n"
+            "      target: '03_Modeler/outputs/{docked}'\n"
+        )
+        src = tmp_path / "src"
+        (src / "outputs/o000/o000_docked/all_pdbs").mkdir(parents=True)
+        (src / "outputs/o000/o000_docked_v2/all_pdbs").mkdir(parents=True)
+        (src / "outputs/o000/o000_docked/all_pdbs/a.pdb").write_text("a")
+        (src / "outputs/o000/o000_docked_v2/all_pdbs/b.pdb").write_text("b")
+
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(schema_file)
+        pack([src], dst, schema=schema)
+
+        assert (dst / "03_Modeler/outputs/o000_docked/all_pdbs/a.pdb").exists()
+        assert (dst / "03_Modeler/outputs/o000_docked_v2/all_pdbs/b.pdb").exists()
+
+    def test_glob_without_name_overwrites(self, tmp_path: Path) -> None:
+        """Without {__name__}, a glob pattern maps every file to the same target."""
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: passthrough\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/o\\d+_docked.*'\n"
+            "      target: '03_Modeler/outputs'\n"
+        )
+        schema = Schema.from_file(schema_file)
+        # Both files resolve to the same path — this is the bug the user reported
+        r1 = schema.forward(Path("outputs/o01/o01_docked_a.txt"))
+        r2 = schema.forward(Path("outputs/o01/o01_docked_b.txt"))
+        assert r1 == r2 == Path("03_Modeler/outputs")
+
+    def test_pack_with_name_variable_no_collision(self, tmp_path: Path) -> None:
+        """Each matched file lands at its own path in the bucket directory."""
+        src = tmp_path / "src"
+        (src / "outputs/o01").mkdir(parents=True)
+        (src / "outputs/o01/o01_docked_a.txt").write_text("a")
+        (src / "outputs/o01/o01_docked_b.txt").write_text("b")
+
+        schema_file = tmp_path / "s.yaml"
+        schema_file.write_text(
+            "schema:\n  name: t\n  fallback: omit\n  rules:\n"
+            "    - pattern: 'outputs/(?P<order>o\\d+)/o\\d+_docked.*'\n"
+            "      target: '03_Modeler/outputs/{__name__}'\n"
+        )
+        dst = tmp_path / "packed"
+        schema = Schema.from_file(schema_file)
+        result = pack([src], dst, schema=schema)
+
+        assert (dst / "03_Modeler/outputs/o01_docked_a.txt").read_text() == "a"
+        assert (dst / "03_Modeler/outputs/o01_docked_b.txt").read_text() == "b"
+        assert result.omitted_count == 0
+
     def test_partial_component_not_matched(self, tmp_path: Path) -> None:
         """Pattern 'data' must not match 'database/file.txt'."""
         schema_file = tmp_path / "s.yaml"

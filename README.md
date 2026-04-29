@@ -39,7 +39,7 @@ pip install pathmorph[xxhash]
 
 ## Quickstart
 
-**1. Write a schema** (`my_schema.yaml`):
+**1. Write a schema** (`my_schema.yaml/toml/json`):
 
 ```yaml
 schema:
@@ -71,7 +71,7 @@ You can also use symlinks that match against a pre-existing rule via its `id`:
 [[schema.rules]]
 id      = "scores"          # optional id — required if referenced by a symlink rule
 pattern = 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\.tsv'
-target  = "experiments/{exp}/candidates/{variant}/developability_scores.tsv"
+target  = "experiments/{exp}/candidates/{variant}/scores.tsv"
 
 [[schema.rules]]
 symlink = "scores"          # references the rule above by id
@@ -81,6 +81,28 @@ target  = "latest/{exp}/{variant}/scores.tsv"
 > [!note]
 > TOML/YAML/JSON schema files are supported
 
+There are three implicit variables always available in `target`:
+
+| Variable       | Value for `outputs/o01/o01_docked_result.txt` |
+| -------------- | --------------------------------------------- |
+| `{__name__}`   | `o01_docked_result.txt`                       |
+| `{__stem__}`   | `o01_docked_result`                           |
+| `{__suffix__}` | `.txt`                                        |
+
+And you can leverage `confuk`/`omegaconf`'s variable interpolation to avoid repeating RegEx patterns:
+
+```toml
+exp_pattern = '(?P<exp>exp\d+[^/]+)'
+variant_pattern = '(?P<variant>v\d+[^/]+)'
+
+[[schema.rules]]
+pattern = 'runs/${exp_pattern}/${variant_pattern}/scores\.tsv'
+target  = "experiments/{exp}/candidates/{variant}/scores.tsv"
+
+[[schema.rules]]
+pattern = 'runs/${exp_pattern}/${variant_pattern}/logs'
+target  = "experiments/{exp}/candidates/{variant}/Reports"
+```
 
 **2. Preview the mapping** (dry-run, no filesystem changes):
 
