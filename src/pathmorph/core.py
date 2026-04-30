@@ -93,7 +93,8 @@ def _source_label(multi: bool, src: Path) -> str:
 
 def _iter_sources(srcs: list[Path]) -> Iterator[tuple[Path, Path, str]]:
     """Yield (abs_path, rel_within_source, label) across all sources."""
-    multi = len(srcs) > 1
+    # multi = len(srcs) > 1
+    multi = True
     for src in srcs:
         label = _source_label(multi, src)
         for abs_path in _iter_files(src):
