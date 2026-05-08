@@ -64,6 +64,26 @@ class VerifyResult:
         return len(self.failed) == 0
 
 
+@dataclass
+class AddResult:
+    original: Path   # original relative path recorded in the manifest
+    packed: Path     # destination relative path within the packed root
+    moved: bool
+
+
+@dataclass
+class RemoveResult:
+    packed: Path     # packed-relative path that was removed
+    original: Path   # original relative path from the manifest entry
+
+
+@dataclass
+class MoveResult:
+    old_packed: Path   # previous packed-relative path
+    new_packed: Path   # new packed-relative path
+    original: Path     # original relative path (unchanged)
+
+
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
@@ -292,3 +312,108 @@ def verify(packed_root: Path) -> VerifyResult:
             failed.append(entry.packed)
 
     return VerifyResult(ok=ok, failed=failed)
+
+
+# ------------------------------------------------------------------ #
+# add_file — explicitly add a file to an already-packed directory     #
+# ------------------------------------------------------------------ #
+
+
+def add_file(
+    src: Path,
+    packed_root: Path,
+    dest_rel: Path,
+    *,
+    original: Path | None = None,
+    source_root: str = "",
+    move: bool = False,
+    collision: CollisionStrategy | None = None,
+) -> AddResult:
+    """
+    Copy (or move) *src* into *packed_root* at *dest_rel* and record
+    the mapping in the existing manifest.
+
+    *original* is the path stored in the manifest entry for ``unpack`` to
+    restore the file to.  Defaults to the source filename.
+    """
+    if not src.is_file():
+        raise FileNotFoundError(f"Source '{src}' does not exist or is not a file.")
+
+    manifest = Manifest.from_file(packed_root)
+    orig = original if original is not None else Path(src.name)
+    abs_dst = packed_root / dest_rel
+
+    resolver = CollisionResolver(collision)
+    if abs_dst.exists():
+        action = resolver.resolve(abs_dst)
+        if action == "skip":
+            return AddResult(original=orig, packed=dest_rel, moved=move)
+
+    _transfer(src, abs_dst, move=move)
+    manifest.add_entry(orig, dest_rel, abs_dst, source_root=source_root)
+    manifest.write(packed_root)
+    return AddResult(original=orig, packed=dest_rel, moved=move)
+
+
+# ------------------------------------------------------------------ #
+# remove_file — remove a file and its manifest entry                  #
+# ------------------------------------------------------------------ #
+
+
+def remove_file(packed_root: Path, packed_rel: Path) -> RemoveResult:
+    """
+    Delete *packed_rel* from *packed_root* and remove its manifest entry.
+
+    If the file is missing from disk the manifest entry is still removed
+    (safe cleanup).
+    """
+    manifest = Manifest.from_file(packed_root)
+    try:
+        entry = manifest.remove_entry(str(packed_rel))
+    except KeyError:
+        raise KeyError(f"No manifest entry for '{packed_rel}'.")
+
+    abs_packed = packed_root / packed_rel
+    if abs_packed.exists():
+        abs_packed.unlink()
+
+    manifest.write(packed_root)
+    return RemoveResult(packed=packed_rel, original=Path(entry.original))
+
+
+# ------------------------------------------------------------------ #
+# move_file — rename a file within the packed directory               #
+# ------------------------------------------------------------------ #
+
+
+def move_file(
+    packed_root: Path,
+    src_rel: Path,
+    dst_rel: Path,
+    *,
+    collision: CollisionStrategy | None = None,
+) -> MoveResult:
+    """
+    Move *src_rel* to *dst_rel* within *packed_root* and update the manifest.
+
+    The ``original`` path recorded at pack time is preserved unchanged.
+    """
+    abs_src = packed_root / src_rel
+    if not abs_src.exists():
+        raise FileNotFoundError(f"'{abs_src}' does not exist in packed directory.")
+
+    manifest = Manifest.from_file(packed_root)
+    abs_dst = packed_root / dst_rel
+
+    resolver = CollisionResolver(collision)
+    if abs_dst.exists():
+        action = resolver.resolve(abs_dst)
+        if action == "skip":
+            entry = next((e for e in manifest.iter_entries() if e.packed == str(src_rel)), None)
+            orig = Path(entry.original) if entry else src_rel
+            return MoveResult(old_packed=src_rel, new_packed=dst_rel, original=orig)
+
+    entry = manifest.rename_entry(str(src_rel), str(dst_rel))
+    _transfer(abs_src, abs_dst, move=True)
+    manifest.write(packed_root)
+    return MoveResult(old_packed=src_rel, new_packed=dst_rel, original=Path(entry.original))

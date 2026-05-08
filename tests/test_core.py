@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from pathmorph.collision import CollisionAbort, CollisionStrategy
-from pathmorph.core import diff, pack, unpack, verify
-from pathmorph.manifest import MANIFEST_FILENAME
+from pathmorph.core import add_file, diff, move_file, pack, remove_file, unpack, verify
+from pathmorph.manifest import MANIFEST_FILENAME, Manifest
 from pathmorph.schemas import Schema
 
 
@@ -27,9 +27,9 @@ schema:
   description: Schema used in unit tests
   fallback: passthrough
   rules:
-    - pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
+    - pattern: 'src/runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
       target: experiments/{exp}/candidates/{variant}/developability_scores.tsv
-    - pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/(?P<rest>.+)'
+    - pattern: 'src/runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/(?P<rest>.+)'
       target: experiments/{exp}/candidates/{variant}/{rest}
 """
 
@@ -39,7 +39,7 @@ schema:
   description: Schema that omits unmatched files
   fallback: omit
   rules:
-    - pattern: 'runs/(?P<exp>[^/]+)/scores\\.tsv'
+    - pattern: 'src/runs/(?P<exp>[^/]+)/scores\\.tsv'
       target: experiments/{exp}/scores.tsv
 """
 
@@ -50,7 +50,7 @@ schema:
   fallback: cram
   crampath: _uncategorized
   rules:
-    - pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
+    - pattern: 'src/runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
       target: experiments/{exp}/candidates/{variant}/developability_scores.tsv
 """
 
@@ -123,7 +123,7 @@ class TestSchemaLoading:
 class TestRuleApply:
     def test_matching_rule(self, schema_file: Path) -> None:
         schema = Schema.from_file(schema_file)
-        result = schema.forward(Path("runs/exp_001/A/scores.tsv"))
+        result = schema.forward(Path("src/runs/exp_001/A/scores.tsv"))
         assert result == Path("experiments/exp_001/candidates/A/developability_scores.tsv")
 
     def test_passthrough_fallback(self, schema_file: Path) -> None:
@@ -194,12 +194,12 @@ class TestRuleApply:
             "    - pattern: 'outputs/(?P<order>o\\d+)/o\\d+_docked.*'\n"
             "      target: '03_Modeler/outputs'\n"
         )
-        src = tmp_path / "src"
-        (src / "outputs/o000/o000_docked/all_pdbs").mkdir(parents=True)
-        (src / "outputs/o000/o000_docked/other").mkdir(parents=True)
-        (src / "outputs/o000/o000_docked/all_pdbs/a.pdb").write_text("a")
-        (src / "outputs/o000/o000_docked/all_pdbs/b.pdb").write_text("b")
-        (src / "outputs/o000/o000_docked/other/c.txt").write_text("c")
+        src = tmp_path / "outputs"
+        (src / "o000/o000_docked/all_pdbs").mkdir(parents=True)
+        (src / "o000/o000_docked/other").mkdir(parents=True)
+        (src / "o000/o000_docked/all_pdbs/a.pdb").write_text("a")
+        (src / "o000/o000_docked/all_pdbs/b.pdb").write_text("b")
+        (src / "o000/o000_docked/other/c.txt").write_text("c")
 
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
@@ -218,11 +218,11 @@ class TestRuleApply:
             "    - pattern: 'outputs/(?P<order>o\\d+)/(?P<docked>o\\d+_docked[^/]*)'\n"
             "      target: '03_Modeler/outputs/{docked}'\n"
         )
-        src = tmp_path / "src"
-        (src / "outputs/o000/o000_docked/all_pdbs").mkdir(parents=True)
-        (src / "outputs/o000/o000_docked_v2/all_pdbs").mkdir(parents=True)
-        (src / "outputs/o000/o000_docked/all_pdbs/a.pdb").write_text("a")
-        (src / "outputs/o000/o000_docked_v2/all_pdbs/b.pdb").write_text("b")
+        src = tmp_path / "outputs"
+        (src / "o000/o000_docked/all_pdbs").mkdir(parents=True)
+        (src / "o000/o000_docked_v2/all_pdbs").mkdir(parents=True)
+        (src / "o000/o000_docked/all_pdbs/a.pdb").write_text("a")
+        (src / "o000/o000_docked_v2/all_pdbs/b.pdb").write_text("b")
 
         dst = tmp_path / "packed"
         schema = Schema.from_file(schema_file)
@@ -247,10 +247,10 @@ class TestRuleApply:
 
     def test_pack_with_name_variable_no_collision(self, tmp_path: Path) -> None:
         """Each matched file lands at its own path in the bucket directory."""
-        src = tmp_path / "src"
-        (src / "outputs/o01").mkdir(parents=True)
-        (src / "outputs/o01/o01_docked_a.txt").write_text("a")
-        (src / "outputs/o01/o01_docked_b.txt").write_text("b")
+        src = tmp_path / "outputs"
+        (src / "o01").mkdir(parents=True)
+        (src / "o01/o01_docked_a.txt").write_text("a")
+        (src / "o01/o01_docked_b.txt").write_text("b")
 
         schema_file = tmp_path / "s.yaml"
         schema_file.write_text(
@@ -362,10 +362,10 @@ class TestPack:
 
     def test_directory_pattern_copies_subtree(self, tmp_path: Path) -> None:
         """A rule matching a directory prefix recursively remaps all files beneath it."""
-        src = tmp_path / "src"
-        (src / "outputs/o01/fp/sub").mkdir(parents=True)
-        (src / "outputs/o01/fp/a.txt").write_text("a")
-        (src / "outputs/o01/fp/sub/b.txt").write_text("b")
+        src = tmp_path / "outputs"
+        (src / "o01/fp/sub").mkdir(parents=True)
+        (src / "o01/fp/a.txt").write_text("a")
+        (src / "o01/fp/sub/b.txt").write_text("b")
 
         schema_file = tmp_path / "s.yaml"
         schema_file.write_text(
@@ -396,13 +396,13 @@ class TestUnpack:
 
     def test_roundtrip_files_present(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         restored = self._roundtrip(src_dir, schema_file, tmp_path)
-        assert (restored / "runs/exp_001/A/scores.tsv").exists()
-        assert (restored / "runs/exp_002/B/scores.tsv").exists()
+        assert (restored / "src/runs/exp_001/A/scores.tsv").exists()
+        assert (restored / "src/runs/exp_002/B/scores.tsv").exists()
 
     def test_roundtrip_content_identical(self, src_dir: Path, schema_file: Path, tmp_path: Path) -> None:
         restored = self._roundtrip(src_dir, schema_file, tmp_path)
         original = src_dir / "runs/exp_001/A/scores.tsv"
-        restored_f = restored / "runs/exp_001/A/scores.tsv"
+        restored_f = restored / "src/runs/exp_001/A/scores.tsv"
         assert original.read_text() == restored_f.read_text()
 
     def test_unpack_missing_manifest_raises(self, tmp_path: Path) -> None:
@@ -488,7 +488,7 @@ class TestMultiSource:
         roots = {e["source_root"] for e in data["entries"]}
         assert len(roots) == 2  # one label per source
 
-    def test_single_source_source_root_empty(
+    def test_single_source_source_root_is_label(
         self, data_dir: Path, multi_schema_file: Path, tmp_path: Path
     ) -> None:
         import json as _json
@@ -496,7 +496,9 @@ class TestMultiSource:
         schema = Schema.from_file(multi_schema_file)
         pack([data_dir], dst, schema=schema)
         data = _json.loads((dst / MANIFEST_FILENAME).read_text())
-        assert all(e["source_root"] == "" for e in data["entries"])
+        # multi=True is always active, so even single-source packs carry the
+        # source directory name as source_root (consistent with multi-source behaviour)
+        assert all(e["source_root"] == data_dir.name for e in data["entries"])
 
 
 # ------------------------------------------------------------------ #
@@ -513,9 +515,9 @@ class TestCramFallback:
 
         # scores.tsv files are remapped by the rule
         assert (dst / "experiments/exp_001/candidates/A/developability_scores.tsv").exists()
-        # report.txt and config.yaml have no matching rule → crammed
-        assert (dst / "_uncategorized/runs/exp_001/A/report.txt").exists()
-        assert (dst / "_uncategorized/unrelated/config.yaml").exists()
+        # report.txt and config.yaml have no matching rule → crammed under virtual path
+        assert (dst / "_uncategorized/src/runs/exp_001/A/report.txt").exists()
+        assert (dst / "_uncategorized/src/unrelated/config.yaml").exists()
 
     def test_cram_records_marked(
         self, src_dir: Path, cram_schema_file: Path, tmp_path: Path
@@ -538,8 +540,8 @@ class TestCramFallback:
         schema = Schema.from_file(cram_schema_file)
         pack([src_dir], dst, schema=schema)
         unpack(dst, restored)
-        assert (restored / "runs/exp_001/A/scores.tsv").exists()
-        assert (restored / "unrelated/config.yaml").exists()
+        assert (restored / "src/runs/exp_001/A/scores.tsv").exists()
+        assert (restored / "src/unrelated/config.yaml").exists()
 
     def test_cram_missing_crampath_raises(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
@@ -567,7 +569,7 @@ schema:
   fallback: passthrough
   rules:
     - id: scores
-      pattern: 'runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
+      pattern: 'src/runs/(?P<exp>[^/]+)/(?P<variant>[^/]+)/scores\\.tsv'
       target: experiments/{exp}/candidates/{variant}/developability_scores.tsv
     - symlink: scores
       target: latest/{exp}/{variant}/scores.tsv
@@ -642,17 +644,17 @@ class TestSymlinkRules:
         schema = Schema.from_file(symlink_schema_file)
         pack([src_dir], dst, schema=schema)
         unpack(dst, restored)
-        # Original files restored, symlink paths not present
-        assert (restored / "runs/exp_001/A/scores.tsv").exists()
+        # Original files restored under source_root="src"; symlink paths not present
+        assert (restored / "src/runs/exp_001/A/scores.tsv").exists()
         assert not (restored / "latest").exists()
 
     def test_symlink_directory_prefix(
         self, tmp_path: Path, symlink_dir_schema_file: Path
     ) -> None:
-        src = tmp_path / "src"
-        (src / "outputs/o01/fp/sub").mkdir(parents=True)
-        (src / "outputs/o01/fp/a.txt").write_text("a")
-        (src / "outputs/o01/fp/sub/b.txt").write_text("b")
+        src = tmp_path / "outputs"
+        (src / "o01/fp/sub").mkdir(parents=True)
+        (src / "o01/fp/a.txt").write_text("a")
+        (src / "o01/fp/sub/b.txt").write_text("b")
 
         dst = tmp_path / "packed"
         schema = Schema.from_file(symlink_dir_schema_file)
@@ -709,3 +711,277 @@ class TestVerify:
         result = verify(dst)
         assert not result.passed
         assert len(result.failed) == 1
+
+
+# ------------------------------------------------------------------ #
+# Shared fixture for add_file / remove_file / move_file tests         #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture()
+def simple_packed_dir(tmp_path: Path) -> Path:
+    """
+    A minimal packed directory constructed directly (no schema / pack() involved).
+
+    Contents:
+        data/file_a.txt  original=orig/file_a.txt  source_root=""
+        data/file_b.txt  original=orig/file_b.txt  source_root=""
+    """
+    packed = tmp_path / "packed"
+    packed.mkdir()
+    (packed / "data").mkdir()
+    (packed / "data/file_a.txt").write_text("content_a\n")
+    (packed / "data/file_b.txt").write_text("content_b\n")
+    manifest = Manifest.new("test_schema", "", "sha256")
+    manifest.add_entry(
+        Path("orig/file_a.txt"), Path("data/file_a.txt"), packed / "data/file_a.txt"
+    )
+    manifest.add_entry(
+        Path("orig/file_b.txt"), Path("data/file_b.txt"), packed / "data/file_b.txt"
+    )
+    manifest.write(packed)
+    return packed
+
+
+# ------------------------------------------------------------------ #
+# add_file                                                             #
+# ------------------------------------------------------------------ #
+
+class TestAddFile:
+    def test_file_copied_to_destination(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "new.txt"
+        src.write_text("new\n")
+        add_file(src, simple_packed_dir, Path("extras/new.txt"))
+        assert (simple_packed_dir / "extras/new.txt").read_text() == "new\n"
+
+    def test_manifest_entry_added(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "new.txt"
+        src.write_text("new\n")
+        add_file(src, simple_packed_dir, Path("extras/new.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        assert "extras/new.txt" in [e["packed"] for e in data["entries"]]
+
+    def test_default_original_is_filename(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "some_name.txt"
+        src.write_text("x\n")
+        result = add_file(src, simple_packed_dir, Path("dest/some_name.txt"))
+        assert result.original == Path("some_name.txt")
+
+    def test_explicit_original_recorded(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "f.txt"
+        src.write_text("x\n")
+        add_file(src, simple_packed_dir, Path("dest/f.txt"), original=Path("deep/orig/f.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        entry = next(e for e in data["entries"] if e["packed"] == "dest/f.txt")
+        assert entry["original"] == "deep/orig/f.txt"
+
+    def test_source_root_recorded(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "f.txt"
+        src.write_text("x\n")
+        add_file(src, simple_packed_dir, Path("dest/f.txt"), source_root="my/source")
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        entry = next(e for e in data["entries"] if e["packed"] == "dest/f.txt")
+        assert entry["source_root"] == "my/source"
+
+    def test_missing_source_raises(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            add_file(tmp_path / "ghost.txt", simple_packed_dir, Path("dest/ghost.txt"))
+
+    def test_missing_manifest_raises(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        src = tmp_path / "f.txt"
+        src.write_text("x\n")
+        with pytest.raises(FileNotFoundError):
+            add_file(src, empty, Path("f.txt"))
+
+    def test_collision_abort(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "f.txt"
+        src.write_text("first\n")
+        add_file(src, simple_packed_dir, Path("dup.txt"))
+        with pytest.raises(CollisionAbort):
+            add_file(src, simple_packed_dir, Path("dup.txt"), collision=CollisionStrategy.ABORT)
+
+    def test_collision_skip_leaves_file_unchanged(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "f.txt"
+        src.write_text("first\n")
+        add_file(src, simple_packed_dir, Path("dup.txt"))
+        src.write_text("second\n")
+        add_file(src, simple_packed_dir, Path("dup.txt"), collision=CollisionStrategy.SKIP)
+        assert (simple_packed_dir / "dup.txt").read_text() == "first\n"
+
+    def test_collision_overwrite_replaces_file(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "f.txt"
+        src.write_text("first\n")
+        add_file(src, simple_packed_dir, Path("dup.txt"))
+        src.write_text("second\n")
+        add_file(src, simple_packed_dir, Path("dup.txt"), collision=CollisionStrategy.OVERWRITE)
+        assert (simple_packed_dir / "dup.txt").read_text() == "second\n"
+
+    def test_move_removes_source(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "moveme.txt"
+        src.write_text("content\n")
+        add_file(src, simple_packed_dir, Path("moved.txt"), move=True)
+        assert not src.exists()
+        assert (simple_packed_dir / "moved.txt").read_text() == "content\n"
+
+    def test_added_file_passes_verify(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "new.txt"
+        src.write_text("new\n")
+        add_file(src, simple_packed_dir, Path("new.txt"))
+        assert verify(simple_packed_dir).passed
+
+    def test_added_file_unpack_roundtrip(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "new.txt"
+        src.write_text("hello\n")
+        add_file(src, simple_packed_dir, Path("added/new.txt"), original=Path("original/new.txt"))
+        restored = tmp_path / "restored"
+        unpack(simple_packed_dir, restored)
+        assert (restored / "original/new.txt").read_text() == "hello\n"
+
+    def test_added_file_with_source_root_unpack_roundtrip(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        src = tmp_path / "new.txt"
+        src.write_text("hello\n")
+        add_file(
+            src, simple_packed_dir, Path("added/new.txt"),
+            original=Path("data/new.txt"), source_root="my/src",
+        )
+        restored = tmp_path / "restored"
+        unpack(simple_packed_dir, restored)
+        assert (restored / "my/src/data/new.txt").read_text() == "hello\n"
+
+
+# ------------------------------------------------------------------ #
+# remove_file                                                          #
+# ------------------------------------------------------------------ #
+
+class TestRemoveFile:
+    def test_file_deleted_from_disk(self, simple_packed_dir: Path) -> None:
+        assert (simple_packed_dir / "data/file_a.txt").exists()
+        remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        assert not (simple_packed_dir / "data/file_a.txt").exists()
+
+    def test_manifest_entry_removed(self, simple_packed_dir: Path) -> None:
+        remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        assert "data/file_a.txt" not in [e["packed"] for e in data["entries"]]
+
+    def test_result_contains_packed_and_original(self, simple_packed_dir: Path) -> None:
+        result = remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        assert result.packed == Path("data/file_a.txt")
+        assert result.original == Path("orig/file_a.txt")
+
+    def test_missing_from_disk_still_removes_manifest_entry(self, simple_packed_dir: Path) -> None:
+        (simple_packed_dir / "data/file_a.txt").unlink()
+        remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        assert "data/file_a.txt" not in [e["packed"] for e in data["entries"]]
+
+    def test_unknown_path_raises(self, simple_packed_dir: Path) -> None:
+        with pytest.raises(KeyError):
+            remove_file(simple_packed_dir, Path("nonexistent/file.txt"))
+
+    def test_remaining_files_pass_verify(self, simple_packed_dir: Path) -> None:
+        remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        result = verify(simple_packed_dir)
+        assert result.passed
+        assert "data/file_a.txt" not in result.ok
+
+    def test_all_entries_removable(self, simple_packed_dir: Path) -> None:
+        remove_file(simple_packed_dir, Path("data/file_a.txt"))
+        remove_file(simple_packed_dir, Path("data/file_b.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        assert data["entries"] == []
+
+
+# ------------------------------------------------------------------ #
+# move_file                                                            #
+# ------------------------------------------------------------------ #
+
+class TestMoveFile:
+    def test_file_relocated_on_disk(self, simple_packed_dir: Path) -> None:
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        assert not (simple_packed_dir / "data/file_a.txt").exists()
+        assert (simple_packed_dir / "archive/file_a.txt").exists()
+
+    def test_file_content_preserved(self, simple_packed_dir: Path) -> None:
+        original_content = (simple_packed_dir / "data/file_a.txt").read_text()
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        assert (simple_packed_dir / "archive/file_a.txt").read_text() == original_content
+
+    def test_manifest_packed_path_updated(self, simple_packed_dir: Path) -> None:
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        packed_paths = [e["packed"] for e in data["entries"]]
+        assert "data/file_a.txt" not in packed_paths
+        assert "archive/file_a.txt" in packed_paths
+
+    def test_original_path_preserved(self, simple_packed_dir: Path) -> None:
+        result = move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        assert result.original == Path("orig/file_a.txt")
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        entry = next(e for e in data["entries"] if e["packed"] == "archive/file_a.txt")
+        assert entry["original"] == "orig/file_a.txt"
+
+    def test_result_fields(self, simple_packed_dir: Path) -> None:
+        result = move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        assert result.old_packed == Path("data/file_a.txt")
+        assert result.new_packed == Path("archive/file_a.txt")
+        assert result.original == Path("orig/file_a.txt")
+
+    def test_missing_source_file_raises(self, simple_packed_dir: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            move_file(simple_packed_dir, Path("nonexistent/file.txt"), Path("other/file.txt"))
+
+    def test_missing_manifest_entry_raises(self, simple_packed_dir: Path) -> None:
+        ghost = simple_packed_dir / "ghost.txt"
+        ghost.write_text("ghost\n")
+        with pytest.raises(KeyError):
+            move_file(simple_packed_dir, Path("ghost.txt"), Path("other/ghost.txt"))
+
+    def test_creates_parent_directories(self, simple_packed_dir: Path) -> None:
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("deep/nested/new/file.txt"))
+        assert (simple_packed_dir / "deep/nested/new/file.txt").exists()
+
+    def test_collision_abort(self, simple_packed_dir: Path) -> None:
+        with pytest.raises(CollisionAbort):
+            move_file(
+                simple_packed_dir,
+                Path("data/file_a.txt"),
+                Path("data/file_b.txt"),
+                collision=CollisionStrategy.ABORT,
+            )
+
+    def test_collision_skip_leaves_both_unchanged(self, simple_packed_dir: Path) -> None:
+        content_a = (simple_packed_dir / "data/file_a.txt").read_text()
+        content_b = (simple_packed_dir / "data/file_b.txt").read_text()
+        move_file(
+            simple_packed_dir,
+            Path("data/file_a.txt"),
+            Path("data/file_b.txt"),
+            collision=CollisionStrategy.SKIP,
+        )
+        assert (simple_packed_dir / "data/file_a.txt").read_text() == content_a
+        assert (simple_packed_dir / "data/file_b.txt").read_text() == content_b
+
+    def test_collision_skip_does_not_update_manifest(self, simple_packed_dir: Path) -> None:
+        move_file(
+            simple_packed_dir,
+            Path("data/file_a.txt"),
+            Path("data/file_b.txt"),
+            collision=CollisionStrategy.SKIP,
+        )
+        data = json.loads((simple_packed_dir / MANIFEST_FILENAME).read_text())
+        packed_paths = [e["packed"] for e in data["entries"]]
+        assert "data/file_a.txt" in packed_paths
+        assert packed_paths.count("data/file_b.txt") == 1
+
+    def test_moved_file_passes_verify(self, simple_packed_dir: Path) -> None:
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        assert verify(simple_packed_dir).passed
+
+    def test_moved_file_unpack_restores_to_original_path(self, tmp_path: Path, simple_packed_dir: Path) -> None:
+        original_content = (simple_packed_dir / "data/file_a.txt").read_text()
+        move_file(simple_packed_dir, Path("data/file_a.txt"), Path("archive/file_a.txt"))
+        restored = tmp_path / "restored"
+        unpack(simple_packed_dir, restored)
+        assert (restored / "orig/file_a.txt").read_text() == original_content

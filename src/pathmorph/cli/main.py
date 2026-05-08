@@ -14,7 +14,7 @@ from rich.table import Table
 from rich import box
 
 from pathmorph.collision import CollisionAbort, CollisionStrategy
-from pathmorph.core import diff, pack, unpack, verify
+from pathmorph.core import add_file, diff, move_file, pack, remove_file, unpack, verify
 from pathmorph.schemas import Schema
 
 app = typer.Typer(
@@ -360,6 +360,128 @@ def verify_cmd(
 
 
 # ------------------------------------------------------------------ #
+# add / cp                                                             #
+# ------------------------------------------------------------------ #
+
+@app.command("add")
+def add_cmd(
+    src: Annotated[Path, typer.Argument(help="Source file to add.")],
+    packed_dir: Annotated[Path, typer.Argument(help="Packed directory containing the manifest.")],
+    dest: Annotated[Path, typer.Argument(help="Destination path relative to PACKED_DIR.")],
+    original: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--original", "-o",
+            help=(
+                "Original relative path to record in the manifest "
+                "(used by `unpack` to restore the file). "
+                "Defaults to the source filename."
+            ),
+            show_default=False,
+        ),
+    ] = None,
+    source_root: Annotated[
+        str,
+        typer.Option(
+            "--source-root",
+            help="Source-root label for multi-source packs (usually left empty).",
+        ),
+    ] = "",
+    move: MoveFlag = False,
+    handle_existing: HandleExistingOpt = None,
+) -> None:
+    """
+    Copy a file into an already-packed directory and record it in the manifest.
+
+    The manifest entry maps ORIGINAL (default: source filename) back to the
+    file so that `unpack` can restore it to the correct location.
+    """
+    try:
+        result = add_file(
+            src, packed_dir, dest,
+            original=original,
+            source_root=source_root,
+            move=move,
+            collision=handle_existing,
+        )
+    except (FileNotFoundError, KeyError) as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=1)
+    except CollisionAbort as e:
+        err_console.print(f"[abort] {e}")
+        raise typer.Exit(code=1)
+
+    action = "moved" if result.moved else "copied"
+    console.print(f"\n[bold green]✓ File {action}[/bold green]")
+    console.print(f"  Source    : [dim]{src}[/dim]")
+    console.print(f"  Packed as : [cyan]{result.packed}[/cyan]")
+    console.print(f"  Original  : [dim]{result.original}[/dim]\n")
+
+
+# Register "cp" as an alias for "add"
+app.command("cp", help="Alias for `add`. Copies a file into a packed directory.")(add_cmd)
+
+
+# ------------------------------------------------------------------ #
+# rm                                                                   #
+# ------------------------------------------------------------------ #
+
+@app.command("rm")
+def rm_cmd(
+    packed_dir: Annotated[Path, typer.Argument(help="Packed directory containing the manifest.")],
+    files: Annotated[list[Path], typer.Argument(help="One or more packed-relative paths to remove.")],
+) -> None:
+    """
+    Remove one or more files from a packed directory and delete their manifest entries.
+
+    FILES are paths relative to PACKED_DIR.
+    """
+    removed = 0
+    for f in files:
+        try:
+            result = remove_file(packed_dir, f)
+        except (FileNotFoundError, KeyError) as e:
+            err_console.print(str(e))
+            raise typer.Exit(code=1)
+        console.print(f"  [red]removed[/red] [cyan]{result.packed}[/cyan]  [dim](was: {result.original})[/dim]")
+        removed += 1
+
+    console.print(f"\n[bold green]✓ {removed} file(s) removed from manifest.[/bold green]\n")
+
+
+# ------------------------------------------------------------------ #
+# mv                                                                   #
+# ------------------------------------------------------------------ #
+
+@app.command("mv")
+def mv_cmd(
+    packed_dir: Annotated[Path, typer.Argument(help="Packed directory containing the manifest.")],
+    src: Annotated[Path, typer.Argument(help="Current packed-relative path of the file.")],
+    dst: Annotated[Path, typer.Argument(help="New packed-relative path for the file.")],
+    handle_existing: HandleExistingOpt = None,
+) -> None:
+    """
+    Move a file within a packed directory and update its manifest entry.
+
+    SRC and DST are both paths relative to PACKED_DIR.
+    The original path recorded at pack time is preserved unchanged.
+    """
+    try:
+        result = move_file(packed_dir, src, dst, collision=handle_existing)
+    except (FileNotFoundError, KeyError) as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=1)
+    except CollisionAbort as e:
+        err_console.print(f"[abort] {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold green]✓ File moved[/bold green]")
+    console.print(f"  From      : [dim]{result.old_packed}[/dim]")
+    console.print(f"  To        : [cyan]{result.new_packed}[/cyan]")
+    console.print(f"  Original  : [dim]{result.original}[/dim]\n")
+
+
+# ------------------------------------------------------------------ #
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
 
@@ -377,6 +499,9 @@ pack_cmd.name = "pack"          # type: ignore[attr-defined]
 unpack_cmd.name = "unpack"      # type: ignore[attr-defined]
 diff_cmd.name = "diff"          # type: ignore[attr-defined]
 verify_cmd.name = "verify"      # type: ignore[attr-defined]
+add_cmd.name = "add"            # type: ignore[attr-defined]
+rm_cmd.name = "rm"              # type: ignore[attr-defined]
+mv_cmd.name = "mv"              # type: ignore[attr-defined]
 
 
 def main() -> None:

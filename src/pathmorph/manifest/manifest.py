@@ -146,6 +146,21 @@ class Manifest:
             )
         )
 
+    def remove_entry(self, packed: str) -> ManifestEntry:
+        """Remove and return the entry for *packed*. Raises KeyError if not found."""
+        for i, entry in enumerate(self.entries):
+            if entry.packed == packed:
+                return self.entries.pop(i)
+        raise KeyError(f"No manifest entry for packed path '{packed}'")
+
+    def rename_entry(self, old_packed: str, new_packed: str) -> ManifestEntry:
+        """Update the packed path for an existing entry in-place. Raises KeyError if not found."""
+        for entry in self.entries:
+            if entry.packed == old_packed:
+                entry.packed = new_packed
+                return entry
+        raise KeyError(f"No manifest entry for packed path '{old_packed}'")
+
     def iter_entries(self) -> Iterator[ManifestEntry]:
         yield from self.entries
 
